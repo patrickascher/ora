@@ -6,7 +6,6 @@ package ora_test
 
 import (
 	"bytes"
-	"context"
 	"crypto/rand"
 	"database/sql"
 	"database/sql/driver"
@@ -174,6 +173,7 @@ var testConStr string
 var testDbsessiontimezone *time.Location
 var testTableID uint32
 var testWorkloadColumnCount int
+var testSes *ora.Ses
 var testDb *sql.DB
 var testSesPool *ora.Pool
 
@@ -210,11 +210,10 @@ func init() {
 	}
 
 	testSesPool = testEnv.NewPool(testSrvCfg, testSesCfg, 4)
-	testSes, err := testSesPool.Get()
+	testSes, err = testSesPool.Get()
 	if err != nil {
 		panic(fmt.Sprintf("initError: %v", err))
 	}
-	defer testSes.Close()
 
 	//ora.SetCfg(func() StmtCfg { cfg = ora.Cfg(); cfg.RTrimChar = false; return cfg }())
 
@@ -262,26 +261,6 @@ END;`)
 			fmt.Println(http.ListenAndServe(addr, nil))
 		}()
 	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	err = testDb.PingContext(ctx)
-	cancel()
-	if err != nil {
-		panic(err)
-	}
-
-	if err := testSes.Ping(); err != nil {
-		panic(err)
-	}
-}
-
-func getSes(t testing.TB) *ora.Ses {
-	testSes, err := testSesPool.Get()
-	if err == nil {
-		return testSes
-	}
-	t.Fatal(err)
-	return nil
 }
 
 func enableLogging(t *testing.T) {
@@ -310,12 +289,6 @@ func testBindDefine(expected interface{}, oct oracleColumnType, t *testing.T, c 
 	}
 	t.Logf("testBindDefine gct (%v, %v)", gct, ora.GctName(gct))
 
-	testSes, err := testSesPool.Get()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer testSes.Close()
-
 	tableName, err := createTable(1, oct, testSes)
 	testErr(err, t)
 	defer dropTable(tableName, testSes, t)
@@ -324,10 +297,10 @@ func testBindDefine(expected interface{}, oct oracleColumnType, t *testing.T, c 
 	qry := fmt.Sprintf("insert into %v (c1) values (:c1)", tableName)
 	insertStmt, err := testSes.Prep(qry)
 	testErr(errors.Wrap(err, qry), t)
-	defer insertStmt.Close()
 	if !c.IsZero() {
 		insertStmt.SetCfg(c)
 	}
+	defer insertStmt.Close()
 	rowsAffected, err := insertStmt.Exe(expected)
 	testErr(errors.Wrapf(err, "%q, %#v", qry, expected), t)
 	expLen := length(expected)
@@ -340,8 +313,8 @@ func testBindDefine(expected interface{}, oct oracleColumnType, t *testing.T, c 
 
 	// select
 	selectStmt, err := testSes.Prep(fmt.Sprintf("select c1 from %v", tableName), gct)
-	testErr(err, t)
 	defer selectStmt.Close()
+	testErr(err, t)
 	rset, err := selectStmt.Qry()
 	testErr(err, t)
 	defer rset.Exhaust()
@@ -357,7 +330,6 @@ func testBindDefineDB(expected interface{}, t *testing.T, oct oracleColumnType) 
 
 			// insert
 			stmt, err := testDb.Prepare(fmt.Sprintf("insert into %v (c1) values (:c1)", tableName))
-			testErr(err, t)
 			defer stmt.Close()
 			execResult, err := stmt.Exec(expected)
 			testErr(err, t)
@@ -369,7 +341,6 @@ func testBindDefineDB(expected interface{}, t *testing.T, oct oracleColumnType) 
 
 			// query
 			rows, err := testDb.Query(fmt.Sprintf("select c1 from %v", tableName))
-			testErr(err, t)
 			defer rows.Close()
 			testErr(err, t)
 			if rows == nil {
@@ -398,9 +369,6 @@ func testBindDefineDB(expected interface{}, t *testing.T, oct oracleColumnType) 
 }
 
 func testBindPtr(expected interface{}, oct oracleColumnType, t *testing.T) {
-	testSes := getSes(t)
-	defer testSes.Close()
-
 	t.Logf("expected=%T", expected)
 	for n := 0; n < testIterations(); n++ {
 		tableName, err := createTable(1, oct, testSes)
@@ -456,8 +424,8 @@ func testBindPtr(expected interface{}, oct oracleColumnType, t *testing.T) {
 		// insert
 		qry := "insert into " + tableName + " (c1) values (:1) returning c1 into :2"
 		stmt, err := testSes.Prep(qry)
-		testErr(err, t)
 		defer stmt.Close()
+		testErr(err, t)
 		t.Logf("%q, [%#v %T]", qry, expected, actual)
 		rowsAffected, err := stmt.Exe(expected, actual)
 		testErr(err, t)
@@ -472,9 +440,6 @@ func testBindPtr(expected interface{}, oct oracleColumnType, t *testing.T) {
 }
 
 func testMultiDefine(expected interface{}, oct oracleColumnType, t *testing.T) {
-	testSes := getSes(t)
-	defer testSes.Close()
-
 	for n := 0; n < testIterations(); n++ {
 		tableName, err := createTable(1, oct, testSes)
 		testErr(err, t)
@@ -482,8 +447,8 @@ func testMultiDefine(expected interface{}, oct oracleColumnType, t *testing.T) {
 
 		// insert
 		insertStmt, err := testSes.Prep(fmt.Sprintf("insert into %v (c1) values (:c1)", tableName))
-		testErr(err, t)
 		defer insertStmt.Close()
+		testErr(err, t)
 		rowsAffected, err := insertStmt.Exe(expected)
 		testErr(err, t)
 		if rowsAffected != 1 {
@@ -571,9 +536,6 @@ func testMultiDefine(expected interface{}, oct oracleColumnType, t *testing.T) {
 // Running the insert and query multiple times will ensure reuse of those structs.
 // Slice binding may have fewer columns tested due to OCI memory contraints.
 func testWorkload(oct oracleColumnType, t *testing.T) {
-	testSes := getSes(t)
-	defer testSes.Close()
-
 	for i := 0; i < testIterations(); i++ {
 		currentMultiple := testWorkloadColumnCount
 		for m := 0; m < 3 && currentMultiple > 0; m++ {
@@ -677,12 +639,6 @@ func testWorkload(oct oracleColumnType, t *testing.T) {
 }
 
 func loadDbtimezone() (*time.Location, error) {
-	testSes, err := testSesPool.Get()
-	if err != nil {
-		return nil, err
-	}
-	defer testSes.Close()
-
 	return testSes.Timezone()
 }
 
@@ -838,24 +794,18 @@ func createTable(multiple int, oct oracleColumnType, ses *ora.Ses) (string, erro
 func dropTable(tableName string, ses *ora.Ses, t testing.TB) {
 	qry := fmt.Sprintf("drop table %v", tableName)
 	stmt, err := ses.Prep(qry)
-	if err != nil {
-		t.Log(err)
-		return
-	}
-	//testErr(errors.Wrap(err, qry), t)
 	defer stmt.Close()
-	if _, err = stmt.Exe(); err != nil {
-		t.Log(err)
-	}
-	//testErr(errors.Wrap(err, qry), t)
+	testErr(errors.Wrap(err, qry), t)
+	_, err = stmt.Exe()
+	testErr(errors.Wrap(err, qry), t)
 }
 
 func createTableDB(db *sql.DB, t *testing.T, octs ...oracleColumnType) string {
 	tableName := tableName()
 	qry := createTableSql(tableName, 1, octs...)
 	stmt, err := db.Prepare(qry)
-	testErr(errors.Wrap(err, qry), t)
 	defer stmt.Close()
+	testErr(errors.Wrap(err, qry), t)
 	_, err = stmt.Exec()
 	testErr(errors.Wrap(err, qry), t)
 	return tableName
@@ -864,8 +814,8 @@ func createTableDB(db *sql.DB, t *testing.T, octs ...oracleColumnType) string {
 func dropTableDB(db *sql.DB, t *testing.T, tableName string) {
 	qry := fmt.Sprintf("drop table %v", tableName)
 	stmt, err := db.Prepare(qry)
-	testErr(errors.Wrap(err, qry), t)
 	defer stmt.Close()
+	testErr(errors.Wrap(err, qry), t)
 	_, err = stmt.Exec()
 	testErr(errors.Wrap(err, qry), t)
 }
@@ -901,7 +851,7 @@ func testErr(err error, t testing.TB, expectedErrs ...error) {
 		}
 	}
 	done := make(chan struct{})
-	msg := fmt.Sprintf("%+v: %s", err, getStack(2))
+	msg := fmt.Sprintf("%v: %s", err, getStack(1))
 	if true {
 		go func() {
 			select {
@@ -2125,8 +2075,16 @@ func gen_OraUint8(isNull bool) ora.Uint8 {
 	return ora.Uint8{Value: gen_uint8(), IsNull: isNull}
 }
 
+func gen_OraFloat64(isNull bool) ora.Float64 {
+	return ora.Float64{Value: gen_float64(), IsNull: isNull}
+}
+
 func gen_OraFloat64Trunc(isNull bool) ora.Float64 {
 	return ora.Float64{Value: gen_float64Trunc(), IsNull: isNull}
+}
+
+func gen_OraFloat32(isNull bool) ora.Float32 {
+	return ora.Float32{Value: gen_float32(), IsNull: isNull}
 }
 
 func gen_OraFloat32Trunc(isNull bool) ora.Float32 {
@@ -2213,6 +2171,16 @@ func gen_uint8Slice() []uint8 {
 	return expected
 }
 
+func gen_float64Slice() []float64 {
+	expected := make([]float64, 5)
+	expected[0] = -6.28318 //5307179586)
+	expected[1] = -3.14159 //2653589793)
+	expected[2] = 0
+	expected[3] = 3.14159 //2653589793)
+	expected[4] = 6.28318 //5307179586)
+	return expected
+}
+
 func gen_float64TruncSlice() []float64 {
 	expected := make([]float64, 5)
 	expected[0] = -6
@@ -2223,6 +2191,16 @@ func gen_float64TruncSlice() []float64 {
 	return expected
 }
 
+func gen_float32Slice() []float32 {
+	expected := make([]float32, 5)
+	expected[0] = -6.28318
+	expected[1] = -3.14159
+	expected[2] = 0
+	expected[3] = 3.14159
+	expected[4] = 6.28318
+	return expected
+}
+
 func gen_float32TruncSlice() []float32 {
 	expected := make([]float32, 5)
 	expected[0] = -6
@@ -2230,6 +2208,15 @@ func gen_float32TruncSlice() []float32 {
 	expected[2] = 0
 	expected[3] = 3
 	expected[4] = 6
+	return expected
+}
+func gen_NumStringSlice() []ora.Num {
+	expected := make([]ora.Num, 5)
+	expected[0] = "-6.28318" //5307179586)
+	expected[1] = "-3.14159" //2653589793)
+	expected[2] = "0"
+	expected[3] = "3.14159" //2653589793)
+	expected[4] = "6.28318" //5307179586)
 	return expected
 }
 
@@ -2323,6 +2310,16 @@ func gen_OraUint8Slice(isNull bool) []ora.Uint8 {
 	return expected
 }
 
+func gen_OraFloat64Slice(isNull bool) []ora.Float64 {
+	expected := make([]ora.Float64, 5)
+	expected[0] = ora.Float64{Value: -float64(6.28318)}
+	expected[1] = ora.Float64{Value: -float64(3.14159)}
+	expected[2] = ora.Float64{IsNull: isNull}
+	expected[3] = ora.Float64{Value: float64(3.14159)}
+	expected[4] = ora.Float64{Value: float64(6.28318)}
+	return expected
+}
+
 func gen_OraFloat64TruncSlice(isNull bool) []ora.Float64 {
 	expected := make([]ora.Float64, 5)
 	expected[0] = ora.Float64{Value: -float64(6)}
@@ -2330,6 +2327,16 @@ func gen_OraFloat64TruncSlice(isNull bool) []ora.Float64 {
 	expected[2] = ora.Float64{IsNull: isNull}
 	expected[3] = ora.Float64{Value: float64(3)}
 	expected[4] = ora.Float64{Value: float64(6)}
+	return expected
+}
+
+func gen_OraFloat32Slice(isNull bool) []ora.Float32 {
+	expected := make([]ora.Float32, 5)
+	expected[0] = ora.Float32{Value: -float32(6.28318)}
+	expected[1] = ora.Float32{Value: -float32(3.14159)}
+	expected[2] = ora.Float32{IsNull: isNull}
+	expected[3] = ora.Float32{Value: float32(3.14159)}
+	expected[4] = ora.Float32{Value: float32(6.28318)}
 	return expected
 }
 
@@ -3601,9 +3608,6 @@ func TestStringSpaces(t *testing.T) {
 
 func TestPLSErr(t *testing.T) {
 	//enableLogging(t)
-	testSes := getSes(t)
-	defer testSes.Close()
-
 	qry := `DECLARE v_db PLS_INTEGER; BEGIN
 	  SELECT 1 INTO v_db FROM DUAL WHERE 1 = 0;
 	END;`
@@ -3638,9 +3642,6 @@ func TestGetDriverName(t *testing.T) {
 	}
 }
 func TestFloat64Prec(t *testing.T) {
-	testSes := getSes(t)
-	defer testSes.Close()
-
 	var v0 float64 = 123456789.0123456789
 	var v1 float64
 	t.Logf("v0 = %.12f = %g", v0, v0)

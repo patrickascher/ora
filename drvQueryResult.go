@@ -37,8 +37,8 @@ func (qr *DrvQueryResult) Next(dest []driver.Value) (err error) {
 	err = qr.rset.beginRow()
 	if err != nil {
 		// FIXME(tgulacsi): this results in erroneous short iteration!
-		qr.rset.closeWithRemove()
-		// but without this close, memory consumption grows!
+		qr.rset.close()
+		// but without this close, memory consumtion grows!
 		qr.rset = nil
 		return err
 	}
@@ -246,8 +246,5 @@ func (qr *DrvQueryResult) ColumnTypeScanType(index int) reflect.Type {
 //
 // Close is a member of the driver.Rows interface.
 func (qr *DrvQueryResult) Close() error {
-	if qr.rset == nil {
-		return nil
-	}
-	return qr.rset.closeWithRemove()
+	return nil
 }

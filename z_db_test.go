@@ -5,10 +5,7 @@
 package ora_test
 
 import (
-	"bytes"
-	"context"
 	"database/sql"
-	"encoding/json"
 	"fmt"
 	"math/rand"
 	"os"
@@ -17,8 +14,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/pkg/errors"
-	"golang.org/x/sync/errgroup"
 	"gopkg.in/rana/ora.v4"
 )
 
@@ -30,32 +25,29 @@ func Test_open_cursors_db(t *testing.T) {
 	// SELECT A.STATISTIC#, A.NAME, B.VALUE
 	// FROM V$STATNAME A, V$MYSTAT B
 	// WHERE A.STATISTIC# = B.STATISTIC#
-	//qry := `SELECT VALUE FROM V$MYSTAT WHERE STATISTIC#=5`
-	qry := `SELECT count(0) FROM v$open_cursor WHERE user_name = user AND cursor_type = 'OPEN'`
-	//qry := `SELECT VALUE FROM v$sesstat WHERE statistic#=5 AND SID = sys_context('USERENV', 'SID')`
-	countStmt, err := testDb.Prepare(qry)
+	qry := "SELECT VALUE FROM V$MYSTAT WHERE STATISTIC#=5"
+	stmt, err := testDb.Prepare(qry)
 	if err != nil {
-		t.Fatal(errors.Wrap(err, qry))
+		t.Fatalf("%q: %v", qry, err)
 	}
-	defer countStmt.Close()
-	count := func() int {
-		var n int
-		if err = countStmt.QueryRow().Scan(&n); err != nil {
-			t.Skipf("%q: %v", qry, err)
-		}
-		return n
+	var before, after int
+	if err = stmt.QueryRow().Scan(&before); err != nil {
+		t.Skipf("%q: %v", qry, err)
 	}
-	before := count()
-	rounds := 2000
+	rounds := 100
 	for i := 0; i < rounds; i++ {
 		func() {
-			rows, err := testDb.Query("SELECT 1 FROM user_objects WHERE ROWNUM < 100")
+			stmt, err := testDb.Prepare("SELECT 1 FROM user_objects WHERE ROWNUM < 100")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer stmt.Close()
+			rows, err := stmt.Query()
 			if err != nil {
 				t.Errorf("SELECT: %v", err)
 				return
 			}
 			defer rows.Close()
-			//t.Logf("in: %d", count())
 			j := 0
 			for rows.Next() {
 				j++
@@ -63,7 +55,9 @@ func Test_open_cursors_db(t *testing.T) {
 			//t.Logf("%d objects, error=%v", j, rows.Err())
 		}()
 	}
-	after := count()
+	if err = stmt.QueryRow().Scan(&after); err != nil {
+		t.Fatal(err)
+	}
 	if after-before >= rounds {
 		t.Errorf("before=%d after=%d, awaited less than %d increment!", before, after, rounds)
 		return
@@ -151,26 +145,6 @@ func TestSetConnMaxLifetime(t *testing.T) {
 	wg.Wait()
 }
 
-func TestNumMarshalJSON_db(t *testing.T) {
-	t.Parallel()
-
-	var v interface{}
-	cfg := ora.Cfg()
-	ora.SetCfg(cfg.SetFloat(ora.N))
-	defer ora.SetCfg(cfg)
-	if err := testDb.QueryRow("SELECT 31415926535897932384626433832795028841/100 FROM DUAL").Scan(&v); err != nil {
-		t.Fatal(err)
-	}
-	t.Logf("v: %T %+v", v, v)
-	b, err := json.Marshal(v)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if bytes.Contains(b, []byte{'='}) {
-		t.Errorf("got %q, wanted just 314...", b)
-	}
-}
-
 func Test_numberP38S0Identity_db(t *testing.T) {
 	t.Parallel()
 	tableName := tableName()
@@ -186,9 +160,6 @@ func Test_numberP38S0Identity_db(t *testing.T) {
 	defer dropTableDB(testDb, t, tableName)
 
 	stmt, err = testDb.Prepare(fmt.Sprintf("insert into %v (c2) values ('go') returning c1 /*lastInsertId*/ into :c1", tableName))
-	if err != nil {
-		t.Fatal(err)
-	}
 	defer stmt.Close()
 
 	// pass nil to Exec when using 'returning into' clause with sql.DB
@@ -341,91 +312,5 @@ func Test_db(t *testing.T) {
 			//enableLogging(t)
 			testBindDefineDB(gen_boolTrue(), t, ct)
 		})
-	}
-}
-
-func TestIssue244(t *testing.T) {
-	t.Parallel()
-	tableName := tableName()
-	qry := "CREATE TABLE " + tableName + " (FUND_ACCOUNT VARCHAR2(18) NOT NULL，FUND_CODE VARCHAR2(6) NOT NULL, BUSINESS_FLAG NUMBER(10) NOT NULL, MONEY_TYPE VARCHAR2(3) NOT NULL)"
-	testDb.Exec("DROP TABLE " + tableName)
-	if _, err := testDb.Exec(qry); err != nil {
-		t.Fatal(errors.Wrap(err, qry))
-	}
-	defer testDb.Exec("DROP TABLE " + tableName)
-	const bf = "143"
-	const sc = "270004"
-	qry = "INSERT INTO " + tableName + " (fund_account, fund_code, business_flag, money_type) VALUES (:1, :2, :3, :4)"
-	stmt, err := testDb.Prepare(qry)
-	if err != nil {
-		t.Fatal(errors.Wrap(err, qry))
-	}
-	fas := []string{"14900666", "1868091", "1898964", "14900397"}
-	for _, v := range fas {
-		if _, err := stmt.Exec(v, sc, bf, "0"); err != nil {
-			stmt.Close()
-			t.Fatal(err)
-		}
-	}
-	stmt.Close()
-
-	dur := time.Minute
-	if testing.Short() {
-		dur = 10 * time.Second
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), dur)
-	defer cancel()
-
-	grp, ctx := errgroup.WithContext(ctx)
-	for i := 0; i < 16; i++ {
-		index := rand.Intn(len(fas))
-		grp.Go(func() error {
-			tx, err := testDb.BeginTx(ctx, nil)
-			if err != nil {
-				return err
-			}
-			defer tx.Rollback()
-
-			qry := `SELECT fund_account, money_type FROM ` + tableName + ` WHERE business_flag = :1 AND fund_code = :2 AND fund_account = :3`
-			stmt, err := tx.Prepare(qry)
-			if err != nil {
-				return err
-			}
-			defer stmt.Close()
-
-			for {
-				index = (index + 1) % len(fas)
-				rows, err := stmt.Query(bf, sc, fas[index])
-				if err != nil {
-					return errors.Wrap(err, qry)
-				}
-
-				for rows.Next() {
-					if err := ctx.Err(); err != nil {
-						rows.Close()
-						return err
-					}
-					var acc, mt string
-					if err = rows.Scan(&acc, &mt); err != nil {
-						rows.Close()
-						return err
-					}
-
-					if acc != fas[index] {
-						rows.Close()
-						return errors.Errorf("got acc %q, wanted %q", acc, fas[index])
-					}
-					if mt != "0" {
-						rows.Close()
-						return errors.Errorf("got mt %q, wanted 0", mt)
-					}
-				}
-				rows.Close()
-			}
-			return nil
-		})
-	}
-	if err := grp.Wait(); err != nil && err != context.DeadlineExceeded {
-		t.Error(err)
 	}
 }

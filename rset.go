@@ -163,13 +163,8 @@ func (rset *Rset) ColumnIndex() map[string]int {
 // closeWithRemove releases allocated resources and removes the Rset from the
 // Stmt.openRsets list.
 func (rset *Rset) closeWithRemove() (err error) {
-	if rset == nil {
-		return nil
-	}
 	rset.RLock()
-	if rset.stmt != nil && rset.stmt.openRsets != nil {
-		rset.stmt.openRsets.remove(rset)
-	}
+	rset.stmt.openRsets.remove(rset)
 	rset.RUnlock()
 	return rset.close()
 }
@@ -416,6 +411,8 @@ func (rset *Rset) NextRow() []interface{} {
 	defer rset.RUnlock()
 	return rset.Row
 }
+
+var defStringPool = sync.Pool{New: func() interface{} { return &defString{} }}
 
 // gets a define struct from a driver slice
 func (rset *Rset) getDef(idx int) interface{} {

@@ -487,19 +487,6 @@ func (n OCINum) String() string {
 	}
 	return s
 }
-func (n OCINum) MarshalJSON() ([]byte, error) {
-	return n.MarshalText()
-}
-func (n OCINum) MarshalText() ([]byte, error) {
-	var a [42]byte
-	return n.OCINum.Print(a[:]), nil
-}
-func (n *OCINum) UnmarshalJSON(p []byte) error {
-	return n.UnmarshalText(p)
-}
-func (n *OCINum) UnmarshalText(p []byte) error {
-	return n.OCINum.SetString(string(p))
-}
 
 // Value returns the driver.Value as required by database/sql.
 // So OCINum is allowed as a parameter to Scan.
@@ -815,6 +802,24 @@ type MultiErr struct {
 // Error is a member of the 'error' interface.
 func (m MultiErr) Error() string {
 	return m.str
+}
+
+// newMultiErr returns a MultiErr or nil.
+// It is valid to pass nil errors to newMultiErr.
+// Nil errors will be filtered out. If all errors
+// are nil newMultiError will return nil.
+func newMultiErr(errs ...error) *MultiErr {
+	var buf bytes.Buffer
+	for _, err := range errs {
+		if err != nil {
+			buf.WriteString(err.Error())
+			buf.WriteString(", ")
+		}
+	}
+	if buf.Len() > 0 {
+		return &MultiErr{str: buf.String()}
+	}
+	return nil
 }
 
 // newMultiErrL returns a MultiErr or nil.

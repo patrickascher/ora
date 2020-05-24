@@ -85,7 +85,7 @@ func (con *Con) BeginTx(ctx context.Context, opts driver.TxOptions) (driver.Tx, 
 		return nil, err
 	}
 	var tx *Tx
-	done := make(chan error, 1)
+	done := make(chan error)
 	go func() {
 		defer close(done)
 		var err error
@@ -94,18 +94,12 @@ func (con *Con) BeginTx(ctx context.Context, opts driver.TxOptions) (driver.Tx, 
 	}()
 	var err error
 	select {
+	case <-ctx.Done():
+		if err = ctx.Err(); isCanceled(err) {
+			con.ses.Break()
+		}
 	case err = <-done:
 		return tx, err
-	case <-ctx.Done():
-		// select again to avoid race condition if both are done
-		select {
-		case err = <-done:
-			return tx, err
-		default:
-			if err = ctx.Err(); isCanceled(err) {
-				con.ses.Break()
-			}
-		}
 	}
 	return nil, maybeBadConn(err)
 }

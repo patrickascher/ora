@@ -798,9 +798,6 @@ func (ses *Ses) Ping() (err error) {
 
 // Break stops the currently running OCI function.
 func (ses *Ses) Break() (err error) {
-	if ses == nil {
-		return nil
-	}
 	ses.log(_drv.Cfg().Log.Ses.Break)
 	err = ses.checkClosed()
 	if err != nil {
@@ -809,9 +806,6 @@ func (ses *Ses) Break() (err error) {
 	ses.Lock()
 	defer ses.Unlock()
 	env := ses.Env()
-	if ses.ocisvcctx == nil || env == nil || env.ocierr == nil {
-		return nil
-	}
 	if r := C.OCIBreak(unsafe.Pointer(ses.ocisvcctx), env.ocierr); r == C.OCI_ERROR {
 		return errE(env.ociError())
 	}

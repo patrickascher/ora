@@ -87,8 +87,9 @@ func errNew(str string) error {
 
 func callInfo(depth int) string {
 	// get caller method name; remove main. prefix
-	pc, _, _, _ := runtime.Caller(depth + 1)
+	pc, file, _, _ := runtime.Caller(depth + 1)
 	// get file name without path or suffix
+	file = file[strings.LastIndex(file, "/")+1 : len(file)-3]
 	method := runtime.FuncForPC(pc).Name()
 	n := strings.LastIndex(method, ")")
 	m := strings.LastIndex(method, "*")
@@ -404,11 +405,11 @@ type bytesArena struct {
 
 func (bp *bytesArena) Get(n int) []byte {
 	p := bp.poolOf(boundingPower(n))
-	b := *(p.Get().(*[]byte))
+	b := p.Get().([]byte)
 	if cap(b) >= n {
 		return b[:n]
 	}
-	p.Put(&b)
+	p.Put(b)
 	return make([]byte, n)
 }
 
@@ -423,7 +424,7 @@ func (bp *bytesArena) Put(p []byte) {
 	if i < bytesArenaOffset {
 		return
 	}
-	bp.poolOf(i).Put(&p)
+	bp.poolOf(i).Put(p)
 }
 func (bp *bytesArena) poolOf(j int) *sync.Pool {
 	j -= bytesArenaOffset
@@ -441,7 +442,7 @@ func (bp *bytesArena) poolOf(j int) *sync.Pool {
 	if p != nil {
 		return p
 	}
-	p = &sync.Pool{New: func() interface{} { z := make([]byte, 1<<(uint(j)+bytesArenaOffset)); return &z }}
+	p = &sync.Pool{New: func() interface{} { return make([]byte, 1<<(uint(j)+bytesArenaOffset)) }}
 	bp.pools[j] = p
 	return p
 }

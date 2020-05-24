@@ -24,7 +24,7 @@ const lobChunkSize = (1 << 20) // 1Mb
 var lobChunkPool = sync.Pool{
 	New: func() interface{} {
 		var b [lobChunkSize]byte
-		return &b
+		return b
 	},
 }
 
@@ -33,6 +33,7 @@ type defLob struct {
 	gct  GoColumnType
 	sqlt C.ub2
 	lobs []*C.OCILobLocator
+	sync.Mutex
 }
 
 func (def *defLob) define(position int, sqlt C.ub2, gct GoColumnType, rset *Rset) error {
@@ -49,7 +50,6 @@ func (def *defLob) define(position int, sqlt C.ub2, gct GoColumnType, rset *Rset
 	env := rset.stmt.ses.srv.env
 	//rset.RUnlock()
 	def.lobs = (*((*[MaxFetchLen]*C.OCILobLocator)(C.malloc(C.size_t(fetchLen) * C.sof_LobLocatorp))))[:fetchLen]
-	def.ensureAllocatedLength(len(def.lobs))
 	if err := def.ociDef.defineByPos(position, unsafe.Pointer(&def.lobs[0]), int(C.sof_LobLocatorp), int(sqlt)); err != nil {
 		return err
 	}
@@ -64,8 +64,8 @@ func (def *defLob) Bytes(offset int) (value []byte, err error) {
 	defer r.Close()
 	lr := r.(*lobReader)
 
-	arr := *(lobChunkPool.Get().(*[lobChunkSize]byte))
-	defer lobChunkPool.Put(&arr)
+	arr := lobChunkPool.Get().([lobChunkSize]byte)
+	defer lobChunkPool.Put(arr)
 	var buf bytes.Buffer
 
 	n, err := r.Read(arr[:])
@@ -113,7 +113,6 @@ func (def *defLob) Reader(offset int) io.ReadCloser {
 	}
 	//def.rset.RUnlock()
 	def.lobs[offset] = nil // don't use it anywhere else
-	def.allocated[offset] = false
 	def.Unlock()
 	//fmt.Printf("%p.Reader(%d): %p\n", def, offset, lr)
 	return lr
@@ -176,7 +175,6 @@ func (def *defLob) alloc() error {
 	//def.rset.RUnlock()
 	ocienv := env.ocienv
 	for i := range def.lobs {
-		def.allocated[i] = false
 		r := C.OCIDescriptorAlloc(
 			unsafe.Pointer(ocienv),                          //CONST dvoid   *parenth,
 			(*unsafe.Pointer)(unsafe.Pointer(&def.lobs[i])), //dvoid         **descpp,
@@ -188,7 +186,6 @@ func (def *defLob) alloc() error {
 		} else if r == C.OCI_INVALID_HANDLE {
 			return errNew("unable to allocate oci lob handle during define")
 		}
-		def.allocated[i] = true
 	}
 	return nil
 }
@@ -196,17 +193,15 @@ func (def *defLob) alloc() error {
 func (def *defLob) free() {
 	def.Lock()
 	defer def.Unlock()
+	def.arrHlp.close()
 	ses := def.rset.stmt.ses
 	for i, lob := range def.lobs {
 		if lob == nil {
 			continue
 		}
 		def.lobs[i] = nil
-		if def.allocated[i] {
-			lobClose(ses, lob)
-		}
+		lobClose(ses, lob)
 	}
-	def.arrHlp.close()
 }
 
 func (def *defLob) close() (err error) {
@@ -339,8 +334,8 @@ func (lr *lobReader) WriteTo(w io.Writer) (n int64, err error) {
 		}
 	}()
 
-	arr := *(lobChunkPool.Get().(*[lobChunkSize]byte))
-	defer lobChunkPool.Put(&arr)
+	arr := lobChunkPool.Get().([lobChunkSize]byte)
+	defer lobChunkPool.Put(arr)
 
 	for {
 		k, err := lr.Read(arr[:])
@@ -508,7 +503,7 @@ func lobOpen(ses *Ses, lob *C.OCILobLocator, mode C.ub1) (
 	return length, nil
 }
 
-func lobClose(ses *Ses, lob *C.OCILobLocator) (err error) {
+func lobClose(ses *Ses, lob *C.OCILobLocator) error {
 	if lob == nil {
 		return nil
 	}
