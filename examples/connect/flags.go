@@ -25,7 +25,7 @@ import (
 	"strings"
 	"sync"
 
-	"gopkg.in/rana/ora.v4"
+	"github.com/patrickascher/ora"
 
 	"github.com/pkg/errors"
 

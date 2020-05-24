@@ -29,8 +29,8 @@ import (
 
 	"github.com/pkg/errors"
 
+	"github.com/patrickascher/ora/tstlg"
 	"gopkg.in/rana/ora.v4"
-	"gopkg.in/rana/ora.v4/tstlg"
 )
 
 type oracleColumnType string
